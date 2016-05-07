@@ -1,0 +1,113 @@
+package mapreduce
+
+import "container/list"
+import "fmt"
+import "log"
+import "time"
+
+
+type WorkerInfo struct {
+	address string
+	// You can add definitions here.
+	
+	busy bool
+}
+
+
+// Clean up all workers by sending a Shutdown RPC to each one of them Collect
+// the number of jobs each work has performed.
+func (mr *MapReduce) KillWorkers() *list.List {
+	l := list.New()
+	for _, w := range mr.Workers {
+		DPrintf("DoWork: shutdown %s\n", w.address)
+		args := &ShutdownArgs{}
+		var reply ShutdownReply
+		ok := call(w.address, "Worker.Shutdown", args, &reply)
+		if ok == false {
+			fmt.Printf("DoWork: RPC %s shutdown error\n", w.address)
+		} else {
+			l.PushBack(reply.Njobs)
+		}
+	}
+	return l
+}
+
+// Hand out map and reduce jobs to workers	
+// Tell the workers the name of the original input file (mr.file) and job number
+// worker knows from which file to read input and to which file to write output
+// Each worker sends a Register RPC to the master when it starts. This is available on mr.registerChannel. Process new worker registrations by reading from channel.
+// Modify the MapReduce struct to keep track of any additional state (e.g., the set of available workers), and initialize this additional state in the InitMapReduce() function.
+// Return only when all jobs have finished
+func (mr *MapReduce) RunMaster() *list.List {
+	// Your code here
+	doneChan := make(chan string)
+	//failChan := make(chan DoJobArgs)
+
+log.Printf("Chicken####################################################")
+	for i := 0; i < mr.nMap; i++ {
+		
+		select {
+			case worker := <- mr.registerChannel:
+				mr.Workers[worker] = &WorkerInfo{worker, false}
+				fmt.Printf("Registered worker %v\n", mr.Workers[worker])
+				i--
+				
+			case worker := <- doneChan:
+				mr.Workers[worker].busy = false
+				i--
+				
+			//case arg := <- failChan:
+				
+				
+			default:
+				if mr.SendJob(mr.file, Map, i, mr.nReduce, doneChan) == false {
+					i--
+				}
+		}
+	}	
+	
+	
+	for i := 0; i < mr.nReduce; i++ {
+		
+		select {
+			case worker := <- mr.registerChannel:
+				mr.Workers[worker] = &WorkerInfo{worker, false}
+				fmt.Printf("Registered worker %v\n", mr.Workers[worker])
+				i--
+				
+			case worker := <- doneChan:
+				mr.Workers[worker].busy = false
+				i--
+				
+			default:
+				if mr.SendJob(mr.file, Reduce, i, mr.nMap, doneChan) == false {
+					i--
+				}
+		}
+	}	
+	
+	return mr.KillWorkers()
+}
+
+func (mr *MapReduce) SendJob(file string, operation JobType, jobNumber int, numOtherPhase int, doneChan chan string) bool {
+	arg := &DoJobArgs{file, operation, jobNumber, numOtherPhase}
+	for worker := range mr.Workers {
+		if (mr.Workers[worker].busy == false) {
+			mr.Workers[worker].busy = true
+			
+			go func(worker string, arg *DoJobArgs, doneChan chan string) {
+				res := &DoJobReply{false}
+				ok := call(worker, "Worker.DoJob", arg, res)
+				
+				if (!ok || !res.OK) {
+					fmt.Printf("Failed to process %v job %d on worker %v\n", arg.Operation, arg.JobNumber, worker)
+				}
+				
+				doneChan <- worker
+			}(worker, arg, doneChan)
+			return true
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	return false
+}
